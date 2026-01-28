@@ -14,6 +14,7 @@ projects.
 ```python
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
 
 class CommAgent(nn.Module):
@@ -34,6 +35,24 @@ class CommAgent(nn.Module):
         return action_logits, outgoing_msg
 
 
+class TinyEnv:
+    """Toy env with 2 agents; reward=1 if actions match, else 0."""
+    def __init__(self, obs_dim):
+        self.obs_dim = obs_dim
+
+    def reset(self, batch=1):
+        obs_a = torch.randn(batch, self.obs_dim)
+        obs_b = torch.randn(batch, self.obs_dim)
+        return obs_a, obs_b
+
+    def step(self, action_a, action_b):
+        reward = (action_a == action_b).float()
+        obs_a = torch.randn(action_a.shape[0], self.obs_dim)
+        obs_b = torch.randn(action_b.shape[0], self.obs_dim)
+        done = torch.zeros_like(reward, dtype=torch.bool)
+        return obs_a, obs_b, reward, done
+
+
 def rollout_step(agent_a, agent_b, obs_a, obs_b, msg_a, msg_b):
     # Agent A acts, sends message to B
     logits_a, next_msg_a = agent_a(obs_a, msg_b)
@@ -46,16 +65,33 @@ def rollout_step(agent_a, agent_b, obs_a, obs_b, msg_a, msg_b):
 obs_dim, msg_dim, act_dim = 8, 4, 5
 agent_a = CommAgent(obs_dim, msg_dim, act_dim)
 agent_b = CommAgent(obs_dim, msg_dim, act_dim)
+optimizer = optim.Adam(
+    list(agent_a.parameters()) + list(agent_b.parameters()),
+    lr=1e-3,
+)
+env = TinyEnv(obs_dim)
 
 # Initial observation + zero message
-obs_a = torch.randn(1, obs_dim)
-obs_b = torch.randn(1, obs_dim)
-msg_a = torch.zeros(1, msg_dim)
-msg_b = torch.zeros(1, msg_dim)
+obs_a, obs_b = env.reset(batch=4)
+msg_a = torch.zeros(4, msg_dim)
+msg_b = torch.zeros(4, msg_dim)
 
-logits_a, logits_b, msg_a, msg_b = rollout_step(
-    agent_a, agent_b, obs_a, obs_b, msg_a, msg_b
-)
+for _ in range(3):
+    logits_a, logits_b, msg_a, msg_b = rollout_step(
+        agent_a, agent_b, obs_a, obs_b, msg_a, msg_b
+    )
+    action_a = torch.argmax(logits_a, dim=-1)
+    action_b = torch.argmax(logits_b, dim=-1)
+    obs_a, obs_b, reward, done = env.step(action_a, action_b)
+
+    # Simple REINFORCE-style loss with shared reward
+    logp_a = torch.log_softmax(logits_a, dim=-1).gather(1, action_a.unsqueeze(1))
+    logp_b = torch.log_softmax(logits_b, dim=-1).gather(1, action_b.unsqueeze(1))
+    loss = -(reward.unsqueeze(1) * (logp_a + logp_b)).mean()
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 ```
 
 **Notes**
